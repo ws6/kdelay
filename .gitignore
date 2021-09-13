@@ -1,0 +1,4 @@
+kafka.rc
+*.exe
+*.exe~
+conf/app.conf
