@@ -9,6 +9,9 @@ multiple cron jobs are fired up for scanning the messages needs to publish
 after publish the message to the outgoing kafka topic, the message will be DELETED
 
 ### usage and configuration
+
+./kdelay 
+
 - see confiugration under conf/.app.conf 
  rename conf/.app.conf to conf/app.conf to allow load credentials
  you will need give credeitials of 
