@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
-	"time"
+
+	"os/signal"
+	"syscall"
 
 	"github.com/beego/beego/v2/core/config"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/ws6/klib"
 	"github.com/ws6/msi"
 )
@@ -23,24 +27,92 @@ func main() {
 	}
 }
 
-func mainErr() error {
+func getTableName(cfg config.Configer) (string, error) {
+	return cfg.String(`kdelay::tablename`)
+}
 
-	cfgr, err := config.NewConfig(`ini`, os.Getenv(`KDELAY_CONFIG_FILE`))
+var GetTableName, SetTableName = func() (
+	func() string,
+	func(string),
+) {
+	var _table_name = `message`
+	return func() string {
+			return _table_name
+		},
+		func(n string) {
+			_table_name = n
+		}
+
+}()
+
+func getExcutablePath() string {
+	ex, err := os.Executable()
 	if err != nil {
+		panic(err)
+	}
+	exPath := filepath.Dir(ex)
+	return exPath
+}
 
+func getDefaultConfigPath() string {
+	exePath := getExcutablePath()
+	return filepath.Join(exePath, `conf`, `app.conf`)
+}
+
+func mainErr() error {
+	configPath := getDefaultConfigPath()
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		configPath = os.Getenv(`KDELAY_CONFIG_FILE`)
+	}
+
+	cfgr, err := config.NewConfig(`ini`, configPath)
+	if err != nil {
 		return err
 	}
+	tableName, err := getTableName(cfgr)
+	if err != nil {
+		return err
+	}
+	SetTableName(tableName)
+
 	dbCfg, err := cfgr.GetSection(`mysql_config`)
 	if err != nil {
 		return err
 	}
 	dbConnStr := getMySqlConfig(dbCfg)
+
+	//create table if not exists
+	db0, err := msi.NewDb(msi.MYSQL, dbConnStr, dbCfg[`db`], ``)
+	if err != nil {
+		return err
+	}
+	if err := createTable(db0, GetTableName()); err != nil {
+		return fmt.Errorf(`createTable:%s`, err.Error())
+	}
+	db0.Close()
+
 	db, err := msi.NewDb(msi.MYSQL, dbConnStr, dbCfg[`db`], ``)
 	if err != nil {
 		return err
 	}
+	if n, err := cfgr.Int(`mysql_config::max_connection`); err == nil && n > 0 {
+		db.Db.SetMaxOpenConns(n)
+	}
+
+	defer db.Close()
+
 	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
+
+	sigchan := make(chan os.Signal, 1)
+	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-sigchan:
+			cancelFn()
+			fmt.Println(`canceld from Signal`)
+		}
+	}()
 	go consume(ctx, db, cfgr)
 	//TODO produce to chan
 	ch, err := produceChan(ctx, cfgr)
@@ -48,8 +120,8 @@ func mainErr() error {
 		return err
 	}
 	defer close(ch)
-	go RunSchedules(ctx, db, cfgr, ch)
-	return nil
+	return RunSchedules(ctx, db, cfgr, ch)
+
 }
 
 func getMySqlConfig(cfg map[string]string) string {
@@ -66,7 +138,7 @@ func kmsgToDb(ctx context.Context, db *msi.Msi, msg *klib.Message) error {
 	if msg == nil || msg.Headers == nil {
 		return fmt.Errorf(`bad message`)
 	}
-	messageTable := db.GetTable(`message`)
+	messageTable := db.GetTable(GetTableName())
 	if messageTable == nil {
 		return fmt.Errorf(`no message table`)
 	}
@@ -75,18 +147,16 @@ func kmsgToDb(ctx context.Context, db *msi.Msi, msg *klib.Message) error {
 	if !ok {
 		return fmt.Errorf(`no %s in header`, RELEASE_AT)
 	}
-	releaseAtUnix, err := strconv.ParseInt(releaseAtStr, 10, 64)
-	if err != nil {
-		return fmt.Errorf(`strconv:%s`, err.Error())
-	}
-	t := time.Unix(releaseAtUnix, 0)
+
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
+	releaseAt := TryParseTime(releaseAtStr)
+	fmt.Println(`got a message want to release at`, releaseAt)
 	return messageTable.Insert(
 		msi.M{
-			`release_at`: t,
+			`release_at`: releaseAt,
 			`body`:       string(body),
 		},
 	)
@@ -94,7 +164,7 @@ func kmsgToDb(ctx context.Context, db *msi.Msi, msg *klib.Message) error {
 }
 
 func consume(ctx context.Context, db *msi.Msi, cfg config.Configer) error {
-
+	fmt.Println(`consumer started`)
 	consumerCfg, err := cfg.GetSection(`consumer_config`)
 	if err != nil {
 		return err
@@ -104,13 +174,7 @@ func consume(ctx context.Context, db *msi.Msi, cfg config.Configer) error {
 		return err
 	}
 
-	//TODO new producer
-
-	//TODO new db connection
-
-	//TODO add crons
-
-	consumer.ConsumeLoop(ctx, consumerCfg[`kdelay_topic`], func(msg *klib.Message) error {
+	consumer.ConsumeLoop(ctx, consumerCfg[`consumer_topic`], func(msg *klib.Message) error {
 		//TODO store it with corrected release_at
 		return kmsgToDb(ctx, db, msg)
 	})
@@ -136,6 +200,7 @@ func produceChan(ctx context.Context, cfg config.Configer) (chan *klib.Message, 
 	}
 	ret := make(chan *klib.Message, chanSize)
 	go func() {
+		fmt.Println(`producer started`)
 		k.ProduceChan(ctx, producerCfg[`producer_topic`], ret)
 	}()
 

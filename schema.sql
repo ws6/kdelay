@@ -1,4 +1,4 @@
-CREATE TABLE `kdelay_dev`.`message` (
+CREATE TABLE `%s`.`message` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `release_at` DATETIME NOT NULL,
