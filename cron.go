@@ -129,9 +129,11 @@ func RunSchedules(ctx context.Context, db *msi.Msi, cfgr config.Configer, msgCha
 	}
 	scheduler.Start()
 	defer scheduler.Stop()
+
 	select {
 	case <-ctx.Done():
 		fmt.Println(`canceled`)
+		return ctx.Err()
 	}
 	return nil
 }
